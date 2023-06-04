@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _CAM_ISP_HW_H_
@@ -27,6 +26,9 @@
  * MAX len of ISP Resource Name
  */
 #define CAM_ISP_RES_NAME_LEN      16
+
+/* Access core_info of isp resource node */
+#define cam_isp_res_core_info(res) (((struct cam_hw_info *)res->hw_intf->hw_priv)->core_info)
 
 enum cam_isp_bw_control_action {
 	CAM_ISP_BW_CONTROL_EXCLUDE       = 0,
@@ -206,7 +208,6 @@ enum cam_isp_hw_cmd_type {
 	CAM_ISP_HW_BUS_MINI_DUMP,
 	CAM_ISP_HW_USER_DUMP,
 	CAM_ISP_HW_CMD_RDI_LCR_CFG,
-	CAM_ISP_HW_CMD_DYNAMIC_CLOCK_UPDATE,
 	CAM_ISP_HW_CMD_MAX,
 };
 

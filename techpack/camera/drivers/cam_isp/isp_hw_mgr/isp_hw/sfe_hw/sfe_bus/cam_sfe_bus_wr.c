@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 
@@ -98,8 +97,6 @@ struct cam_sfe_bus_wr_common_data {
 
 	uint32_t                                    sfe_debug_cfg;
 	struct cam_sfe_bus_cache_dbg_cfg            cache_dbg_cfg;
-	uint32_t                                    image_size_violation_status;
-	uint32_t                                    ccif_violation_status;
 };
 
 struct cam_sfe_wr_scratch_buf_info {
@@ -204,8 +201,6 @@ struct cam_sfe_bus_wr_priv {
 	uint32_t                            num_cons_err;
 	struct cam_sfe_constraint_error_info      *constraint_error_list;
 	struct cam_sfe_bus_sfe_out_hw_info        *sfe_out_hw_info;
-	uint32_t                                   num_bus_wr_errors;
-	struct cam_sfe_bus_wr_err_irq_desc        *bus_wr_err_desc;
 };
 
 static int cam_sfe_bus_subscribe_error_irq(
@@ -447,12 +442,12 @@ static void cam_sfe_bus_wr_print_constraint_errors(
 	}
 }
 
-void cam_sfe_bus_wr_get_constraint_errors(void *bus_pvt, void *args)
+static void cam_sfe_bus_wr_get_constraint_errors(
+	bool                       *skip_error_notify,
+	struct cam_sfe_bus_wr_priv *bus_priv)
 {
 	uint32_t i, j, constraint_errors;
 	uint8_t *wm_name = NULL;
-	bool    *skip_err_notify = args;
-	struct cam_sfe_bus_wr_priv                *bus_priv = bus_pvt;
 	struct cam_isp_resource_node              *out_rsrc_node = NULL;
 	struct cam_sfe_bus_wr_out_data            *out_rsrc_data = NULL;
 	struct cam_sfe_bus_wr_wm_resource_data    *wm_data   = NULL;
@@ -483,7 +478,7 @@ void cam_sfe_bus_wr_get_constraint_errors(void *bus_pvt, void *args)
 				if ((out_rsrc_data->out_type >= CAM_SFE_BUS_SFE_OUT_RDI0) &&
 					(out_rsrc_data->out_type <= CAM_SFE_BUS_SFE_OUT_RDI4) &&
 					(constraint_errors >> 21)) {
-					*skip_err_notify = true;
+					*skip_error_notify = true;
 					CAM_DBG(CAM_SFE, "WM: %s constraint_error: 0x%x",
 						wm_name, constraint_errors);
 					continue;
@@ -843,6 +838,8 @@ static int cam_sfe_bus_release_wm(void   *bus_priv,
 	rsrc_data->hfr_cfg_done = false;
 	rsrc_data->en_cfg = 0;
 	rsrc_data->is_dual = 0;
+	rsrc_data->enable_caching =  false;
+	rsrc_data->offset = 0;
 
 	wm_res->tasklet_info = NULL;
 	wm_res->res_state = CAM_ISP_RESOURCE_STATE_AVAILABLE;
@@ -927,8 +924,6 @@ static int cam_sfe_bus_stop_wm(struct cam_isp_resource_node *wm_res)
 	wm_res->res_state = CAM_ISP_RESOURCE_STATE_RESERVED;
 	rsrc_data->init_cfg_done = false;
 	rsrc_data->hfr_cfg_done = false;
-	rsrc_data->enable_caching =  false;
-	rsrc_data->offset = 0;
 
 	return 0;
 }
@@ -2211,27 +2206,14 @@ static int cam_sfe_bus_wr_err_irq_top_half(uint32_t evt_id,
 	return rc;
 }
 
-void cam_sfe_bus_wr_print_ccif_violation_status(void *bus_pvt, void *args)
-{
-	struct cam_sfe_bus_wr_priv             *bus_priv = bus_pvt;
-
-	CAM_ERR(CAM_SFE, "SFE:%d CCIF Violation status 0x%x",
-			bus_priv->common_data.core_index,
-			bus_priv->common_data.image_size_violation_status);
-}
-
-void cam_sfe_bus_wr_print_violation_info(void *bus_pvt, void *args)
+static void cam_sfe_bus_wr_print_violation_info(
+	uint32_t status, struct cam_sfe_bus_wr_priv *bus_priv)
 {
 	int i, j, wm_idx;
-	struct cam_sfe_bus_wr_priv             *bus_priv = bus_pvt;
 	struct cam_isp_resource_node           *sfe_out = NULL;
 	struct cam_isp_resource_node           *wm_res = NULL;
 	struct cam_sfe_bus_wr_out_data         *rsrc_data = NULL;
 	struct cam_sfe_bus_wr_wm_resource_data *wm_data = NULL;
-
-	CAM_ERR(CAM_SFE, "SFE:%d Image Size Violation status 0x%x",
-			bus_priv->common_data.core_index,
-			bus_priv->common_data.image_size_violation_status);
 
 	for (i = 0; i < bus_priv->num_out; i++) {
 		sfe_out = &bus_priv->sfe_out[i];
@@ -2249,7 +2231,7 @@ void cam_sfe_bus_wr_print_violation_info(void *bus_pvt, void *args)
 				return;
 			}
 
-			if (bus_priv->common_data.image_size_violation_status & (1 << wm_idx))
+			if (status & (1 << wm_idx))
 				__cam_sfe_bus_wr_print_wm_info(wm_data);
 		}
 	}
@@ -2259,7 +2241,7 @@ static int cam_sfe_bus_wr_irq_bottom_half(
 	void *handler_priv, void *evt_payload_priv)
 {
 	int i;
-	uint32_t status = 0;
+	uint32_t status = 0, cons_violation = 0;
 	bool skip_err_notify = false;
 	struct cam_sfe_bus_wr_priv            *bus_priv = handler_priv;
 	struct cam_sfe_bus_wr_common_data     *common_data;
@@ -2272,22 +2254,21 @@ static int cam_sfe_bus_wr_irq_bottom_half(
 	common_data = &bus_priv->common_data;
 
 	status = evt_payload->irq_reg_val[CAM_SFE_IRQ_BUS_REG_STATUS0];
-	bus_priv->common_data.image_size_violation_status =
-		evt_payload->image_size_violation_status;
-	bus_priv->common_data.ccif_violation_status =
-		evt_payload->ccif_violation_status;
+	cons_violation = (status >> 28) & 0x1;
 
-	for (i = 0; i < bus_priv->num_bus_wr_errors; i++) {
-		if (bus_priv->bus_wr_err_desc[i].bitmask & status) {
-			CAM_ERR(CAM_SFE, " SFE:%d status0 0x%x %s %s",
-				bus_priv->common_data.core_index, status,
-				bus_priv->bus_wr_err_desc[i].err_name,
-				bus_priv->bus_wr_err_desc[i].desc);
-			 if (bus_priv->bus_wr_err_desc[i].err_handler)
-				bus_priv->bus_wr_err_desc[i].err_handler
-					(bus_priv, &skip_err_notify);
-		}
-	}
+	CAM_ERR(CAM_SFE,
+		"SFE:%d status0 0x%x Image Size violation status 0x%x CCIF violation status 0x%x",
+		bus_priv->common_data.core_index, status,
+		evt_payload->image_size_violation_status,
+		evt_payload->ccif_violation_status);
+
+	if (evt_payload->image_size_violation_status)
+		cam_sfe_bus_wr_print_violation_info(
+			evt_payload->image_size_violation_status,
+			bus_priv);
+
+	if (cons_violation)
+		cam_sfe_bus_wr_get_constraint_errors(&skip_err_notify, bus_priv);
 
 	cam_sfe_bus_wr_put_evt_payload(common_data, &evt_payload);
 
@@ -3369,8 +3350,6 @@ int cam_sfe_bus_wr_init(
 	bus_priv->common_data.sfe_irq_controller   = sfe_irq_controller;
 	bus_priv->num_cons_err = hw_info->num_cons_err;
 	bus_priv->constraint_error_list = hw_info->constraint_error_list;
-	bus_priv->num_bus_wr_errors = hw_info->num_bus_wr_errors;
-	bus_priv->bus_wr_err_desc   = hw_info->bus_wr_err_desc;
 	bus_priv->sfe_out_hw_info = hw_info->sfe_out_hw_info;
 	rc = cam_cpas_get_cpas_hw_version(&bus_priv->common_data.hw_version);
 	if (rc) {
