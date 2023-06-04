@@ -9,6 +9,9 @@
 #include "sde_hw_catalog.h"
 #include "sde_hw_intf.h"
 #include "sde_dbg.h"
+#if defined(CONFIG_PXLW_IRIS)
+#include "dsi_iris_api.h"
+#endif
 
 #define INTF_TIMING_ENGINE_EN           0x000
 #define INTF_CONFIG                     0x004
@@ -252,7 +255,6 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 	u32 display_data_hctl = 0, active_data_hctl = 0;
 	u32 data_width;
 	bool dp_intf = false;
-	u32 pack_pattern;
 
 	/* read interface_cfg */
 	intf_cfg = SDE_REG_READ(c, INTF_CONFIG);
@@ -365,19 +367,17 @@ static void sde_hw_intf_setup_timing_engine(struct sde_hw_intf *ctx,
 		(vsync_polarity << 1) | /* VSYNC Polarity */
 		(hsync_polarity << 0);  /* HSYNC Polarity */
 
-	pack_pattern = SDE_FORMAT_IS_FSC(fmt) ? 0x18 : 0x21;
-
 	if (!SDE_FORMAT_IS_YUV(fmt))
 		panel_format = (fmt->bits[C0_G_Y] |
 				(fmt->bits[C1_B_Cb] << 2) |
 				(fmt->bits[C2_R_Cr] << 4) |
-				(pack_pattern << 8));
+				(0x21 << 8));
 	else
 		/* Interface treats all the pixel data in RGB888 format */
 		panel_format = (COLOR_8BIT |
 				(COLOR_8BIT << 2) |
 				(COLOR_8BIT << 4) |
-				(pack_pattern << 8));
+				(0x21 << 8));
 
 	if (p->wide_bus_en)
 		intf_cfg2 |= BIT(0);
@@ -642,6 +642,7 @@ static int sde_hw_intf_setup_te_config(struct sde_hw_intf *intf,
 	spin_lock(&tearcheck_spinlock);
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_WRCOUNT,
 			(te->start_pos + te->sync_threshold_start + 1));
+
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
 	wmb(); /* disable vsync counter before updating single buffer registers */
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_HEIGHT, te->sync_cfg_height);
@@ -654,6 +655,7 @@ static int sde_hw_intf_setup_te_config(struct sde_hw_intf *intf,
 			 te->sync_threshold_start));
 	cfg |= BIT(19); /* VSYNC_COUNTER_EN */
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
+
 	spin_unlock(&tearcheck_spinlock);
 
 	return 0;
@@ -876,6 +878,12 @@ static void sde_hw_intf_enable_compressed_input(struct sde_hw_intf *intf,
 	c = &intf->hw;
 	intf_cfg2 = SDE_REG_READ(c, INTF_CONFIG2);
 
+#if defined(CONFIG_PXLW_IRIS)
+	if (iris_is_chip_supported()) {
+	/* fixed for dynamic switching from dsc panel timing into raw timing */
+		intf_cfg2 &= ~BIT(12);
+	}
+#endif
 	_check_and_set_comp_bit(intf, dsc_4hs_merge, compression_en,
 			&intf_cfg2);
 
